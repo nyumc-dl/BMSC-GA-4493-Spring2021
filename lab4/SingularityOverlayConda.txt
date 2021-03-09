@@ -1,0 +1,196 @@
+
+[wang@cs001 ~]$ which singularity 
+/share/apps/singularity/bin/singularity
+[wang@cs001 ~]$ singularity version
+3.6.4
+[wang@cs001 ~]$ 
+
+To setup conda enviorment with Sigularity and overlay images
+
+For example, I'm working from folder /scratch/wang/zzz
+
+cd /scratch/wang/zzz
+
+Copy the proper gzipped overlay images from /scratch/work/public/overlay-fs-ext3, overlay-5GB-200K.ext3.gz is good enough for most conda enviorment, it has 5GB free space inside and is able to hold 200K files
+
+cp -rp /scratch/work/public/overlay-fs-ext3/overlay-5GB-200K.ext3.gz .
+gunzip overlay-5GB-200K.ext3.gz
+
+Choose proper Singualrity images, for TensorFlow today, 
+
+/scratch/work/public/singularity/cuda10.1-cudnn7-devel-ubuntu18.04.sif 
+
+For PyTorch, 
+
+/scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif
+
+To setup conda enviorment, fist launch container interactively 
+
+singularity exec --overlay overlay-5GB-200K.ext3 /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif /bin/bash
+
+Now inside the container, install miniconda into /ext3/miniconda3
+
+wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
+sh Miniconda3-latest-Linux-x86_64.sh -b -p /ext3/miniconda3
+export PATH=/ext3/miniconda3/bin:$PATH
+conda update -n base conda -y
+
+create a wrapper script /ext3/env.sh 
+
+#!/bin/bash
+
+source /ext3/miniconda3/etc/profile.d/conda.sh
+export PATH=/ext3/miniconda3/bin:$PATH
+
+Now exit the container 
+
+exit
+
+Relaunch the container 
+
+singularity exec --overlay overlay-5GB-200K.ext3 /scratch/work/public/singularity/cuda10.1-cudnn7-devel-ubuntu18.04.sif /bin/bash
+source /ext3/env.sh
+
+[wang@cs001 zzz]$ singularity exec --overlay overlay-5GB-200K.ext3 /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif /bin/bash
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ source /ext3/env.sh 
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ which python
+/ext3/miniconda3/bin/python
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ which pip   
+/ext3/miniconda3/bin/pip
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ which conda
+/ext3/miniconda3/bin/conda
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ python --version
+Python 3.8.5
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ 
+
+Now install packages into this base enviorment either with pip or conda
+
+https://pytorch.org
+
+pip install torch==1.7.0+cu110 torchvision==0.8.1+cu110 torchaudio===0.7.0 -f https://download.pytorch.org/whl/torch_stable.html
+
+pip install jupyter jupyterhub pandas matplotlib scipy
+pip install scikit-learn scikit-image Pillow
+
+conda clean --all --yes
+
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ find /ext3 | wc -l
+46246
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ du -sh /ext3/
+3.8G    /ext3/
+[cuda11.0-cudnn8-devel-ubuntu18.04.sif wang@cs001 zzz]$ 
+
+Exit from container. Rename the overlay image, 
+mv overlay-5GB-200K.ext3 pytorch1.7.0-cuda11.0.ext3
+
+[wang@cs001 zzz]$ singularity exec --overlay /scratch/wang/zzz/pytorch1.7.0-cuda11.0.ext3:ro /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif bash -c 'source /ext3/env.sh; python -c "import torch; print(torch.__file__); print(torch.__version__)"'
+/ext3/miniconda3/lib/python3.8/site-packages/torch/__init__.py
+1.7.0+cu110
+[wang@cs001 zzz]$ 
+
+
+SLURM job in batch mode
+
+Python script t1.py
+
+#!/bin/env python
+
+import torch
+
+print(torch.__file__)
+print(torch.__version__)
+
+# How many GPUs are there?
+print(torch.cuda.device_count())
+
+# Get the name of the current GPU
+print(torch.cuda.get_device_name(torch.cuda.current_device()))
+
+# Is PyTorch using a GPU?
+print(torch.cuda.is_available())
+
+
+
+SLURM script t1.SBATCH
+
+#!/bin/bash
+
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=1:00:00
+#SBATCH --mem=2GB
+#SBATCH --gres=gpu
+#SBATCH --job-name=torch
+
+module purge
+
+singularity exec --nv \
+	    --overlay /scratch/wang/zzz/pytorch1.7.0-cuda11.0.ext3:ro \
+	    /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif \
+	    bash -c "source /ext3/env.sh; python t1.py"
+
+SLURM log file
+
+[wang@cs001 zzz]$ cat slurm-175171.out 
+/ext3/miniconda3/lib/python3.8/site-packages/torch/__init__.py
+1.7.0+cu110
+1
+Quadro RTX 8000
+True
+[wang@cs001 zzz]$ 
+
+*******************************
+
+Option step to covert ext3 to readonly squashfs filesystem
+
+singularity exec --overlay pytorch1.7.0-cuda11.0.ext3:ro /scratch/work/public/singularity/centos-8.2.2004.sif mksquashfs /ext3 pytorch1.7.0-cuda11.0.sqf -keep-as-directory
+
+[wang@cs001 zzz]$ ls -lh pytorch1.7.0-cuda11.0.*
+-rw-r--r-- 1 wang wang 5.5G Nov 29 22:38 pytorch1.7.0-cuda11.0.ext3
+-rw-r--r-- 1 wang wang 1.5G Nov 29 23:05 pytorch1.7.0-cuda11.0.sqf
+[wang@cs001 zzz]$ 
+
+#!/bin/bash
+
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=1:00:00
+#SBATCH --mem=2GB
+#SBATCH --gres=gpu
+#SBATCH --job-name=torch
+
+module purge
+
+singularity exec --nv \
+            --overlay /scratch/wang/zzz/pytorch1.7.0-cuda11.0.sqf:ro \
+            /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif \
+            bash -c "source /ext3/env.sh; python t1.py"
+
+             WARNING: The scripts f2py, f2py3 and f2py3.8 are installed in '/home/wang/.local/bin' which is not on PATH.
+  Consider adding this directory to PATH or, if you prefer to suppress this warning, use --no-warn-script-location.
+
+*********************************
+
+export PYTHONNOUSERSITE=True
+
+cp -rp /scratch/work/public/overlay-fs-ext3/overlay-2GB-100K.ext3.gz .
+gunzip overlay-2GB-100K.ext3.gz
+singularity exec --overlay overlay-2GB-100K.ext3 --overlay /scratch/wang/zzz/pytorch1.7.0-cuda11.0.sqf:ro /scratch/work/public/singularity/cuda11.0-cudnn8-devel-ubuntu18.04.sif
+source /ext3/env.sh
+
+Conda enviorment and huge amount of tiny files with overlay image
+
+singularity exec --nv \
+            --overlay /scratch/wang/detr/pyenv/detr-20201026.ext3:ro \
+            --overlay /scratch/wang/detr/pyenv/cocodataset.sqf:ro \
+            --bind /scratch/wang/detr/pyenv/slurm.py:/ext3/miniconda3/lib/python3.8/site-packages/submitit/slurm/slurm.py:ro \
+            /scratch/work/public/singularity/cuda10.1-cudnn7-devel-ubuntu18.04.sif \
+            bash
+
+
+
+
+
+
